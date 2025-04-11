@@ -91,6 +91,7 @@ function App() {
   const [commandHistory, setCommandHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [currentCommand, setCurrentCommand] = useState('');
+  const currentLineBufferRef = useRef('');
 
   useEffect(() => {
     const initTerminal = () => {
@@ -127,14 +128,12 @@ function App() {
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
 
-      // Open terminal first
       term.open(terminalRef.current);
+      fitAddon.fit();
+      term.focus();
 
-      // Use requestAnimationFrame to ensure the terminal is rendered
-      requestAnimationFrame(() => {
-        if (terminalRef.current) {
-          fitAddon.fit();
-        }
+      window.addEventListener('resize', () => {
+        fitAddon.fit();
       });
 
       term.writeln('Welcome to Kubernetes Troubleshooting Simulator!');
@@ -143,45 +142,63 @@ function App() {
       term.writeln('Type "help" for available commands.');
       term.write('\r\n$ ');
 
-      let currentLine = '';
+      term.onData(data => {
+        // Handle paste events
+        if (data.length > 1) {
+          const lines = data.split(/\r?\n/);
+          if (lines.length > 1) {
+            // Handle multi-line paste
+            lines.forEach((line, i) => {
+              if (i === 0) {
+                // First line gets appended to current command
+                currentLineBufferRef.current += line;
+                term.write(line);
+              } else {
+                // Subsequent lines trigger new commands
+                term.write('\r\n');
+                handleCommand(currentLineBufferRef.current);
+                currentLineBufferRef.current = line;
+                term.write('$ ' + line);
+              }
+            });
+          } else {
+            // Single line paste
+            currentLineBufferRef.current += data;
+            term.write(data);
+          }
+        }
+      });
 
       term.onKey(({ key, domEvent }) => {
-        const printable = !domEvent.altKey && !domEvent.ctrlKey && !domEvent.metaKey;
+        const ev = domEvent;
+        const printable = !ev.altKey && !ev.ctrlKey && !ev.metaKey;
 
-        if (domEvent.keyCode === 13) { // Enter
+        if (ev.keyCode === 13) { // Enter
           term.write('\r\n');
-          handleCommand(currentLine);
-          currentLine = '';
+          if (currentLineBufferRef.current.trim().length > 0) {
+            handleCommand(currentLineBufferRef.current);
+          }
+          currentLineBufferRef.current = '';
           term.write('$ ');
-        } else if (domEvent.keyCode === 8) { // Backspace
-          if (currentLine.length > 0) {
-            currentLine = currentLine.slice(0, -1);
+        } else if (ev.keyCode === 8) { // Backspace
+          if (currentLineBufferRef.current.length > 0) {
+            currentLineBufferRef.current = currentLineBufferRef.current.slice(0, -1);
             term.write('\b \b');
           }
         } else if (printable) {
-          currentLine += key;
+          currentLineBufferRef.current += key;
           term.write(key);
         }
       });
 
       xtermRef.current = term;
 
-      // Add resize listener
-      const handleResize = () => {
-        if (terminalRef.current) {
-          fitAddon.fit();
-        }
-      };
-
-      window.addEventListener('resize', handleResize);
-
       return () => {
-        window.removeEventListener('resize', handleResize);
+        window.removeEventListener('resize', () => fitAddon.fit());
         term.dispose();
       };
     };
 
-    // Initialize terminal
     initTerminal();
   }, []);
 
@@ -208,26 +225,36 @@ function App() {
     const term = xtermRef.current;
     if (!term) return;
 
+    const writeLines = (lines: string[]) => {
+      lines.forEach(line => {
+        term.writeln(line);
+      });
+    };
+
     if (command === 'help') {
-      term.writeln('Available commands:');
-      term.writeln('  kubectl get pods           - List all pods');
-      term.writeln('  kubectl describe pod NAME  - Show details of a pod');
-      term.writeln('  kubectl logs NAME         - Show logs of a pod');
-      term.writeln('  kubectl edit deployment NAME - Edit a deployment');
-      term.writeln('  clear                     - Clear the terminal');
-      term.writeln('  help                      - Show this help message');
+      writeLines([
+        'Available commands:',
+        '  kubectl get pods           - List all pods',
+        '  kubectl describe pod NAME  - Show details of a pod',
+        '  kubectl logs NAME         - Show logs of a pod',
+        '  kubectl edit deployment NAME - Edit a deployment',
+        '  clear                     - Clear the terminal',
+        '  help                      - Show this help message'
+      ]);
     } else if (command === 'clear') {
       term.clear();
     } else if (command === 'kubectl get pods') {
-      term.writeln('NAME                         READY   STATUS              RESTARTS   AGE');
-      clusterState.pods.forEach(pod => {
-        term.writeln(`${pod.name.padEnd(28)} ${pod.ready ? '1/1' : '0/1'}     ${pod.status.padEnd(20)} ${pod.restarts}          ${pod.age}`);
-      });
+      writeLines([
+        'NAME                         READY   STATUS              RESTARTS   AGE',
+        ...clusterState.pods.map(pod => 
+          `${pod.name.padEnd(28)} ${pod.ready ? '1/1' : '0/1'}     ${pod.status.padEnd(20)} ${pod.restarts}          ${pod.age}`
+        )
+      ]);
     } else if (command.startsWith('kubectl logs')) {
       const podName = command.split(' ')[2];
       const pod = clusterState.pods.find(p => p.name.startsWith(podName));
       if (pod?.logs) {
-        pod.logs.forEach(log => term.writeln(log));
+        writeLines(pod.logs);
       } else {
         term.writeln(`Error: pod "${podName}" not found`);
       }
@@ -235,32 +262,37 @@ function App() {
       const podName = command.split(' ')[3];
       const pod = clusterState.pods.find(p => p.name.startsWith(podName));
       if (pod) {
-        term.writeln(`Name:         ${pod.name}`);
-        term.writeln(`Namespace:    default`);
-        term.writeln(`Priority:     0`);
-        term.writeln(`Node:         ${pod.node}`);
-        term.writeln(`Start Time:   ${pod.age} ago`);
-        term.writeln(`Labels:       app=${pod.name.split('-')[0]}`);
-        term.writeln(`Status:       ${pod.status}`);
-        term.writeln(`IP:           ${pod.ip}`);
-        term.writeln(`IPs:`);
-        term.writeln(`  IP:  ${pod.ip}`);
-        term.writeln('Containers:');
-        term.writeln(`  ${pod.name.split('-')[0]}:`);
-        term.writeln('    Container ID:  docker://1234567890abcdef');
-        term.writeln(`    Image:         ${pod.name.split('-')[0]}:latest`);
-        term.writeln('    Image ID:      docker-pullable://registry.k8s.io/pause:3.9');
-        term.writeln(`    Port:          ${pod.name.includes('postgresql') ? '5432/TCP' : '8080/TCP'}`);
-        term.writeln(`    Host Port:     0/TCP`);
-        term.writeln(`    State:         ${pod.status}`);
-        term.writeln(`    Ready:         ${pod.ready}`);
-        term.writeln(`    Restart Count: ${pod.restarts}`);
-        term.writeln('Events:');
+        writeLines([
+          `Name:         ${pod.name}`,
+          `Namespace:    default`,
+          `Priority:     0`,
+          `Node:         ${pod.node}`,
+          `Start Time:   ${pod.age} ago`,
+          `Labels:       app=${pod.name.split('-')[0]}`,
+          `Status:       ${pod.status}`,
+          `IP:           ${pod.ip}`,
+          'IPs:',
+          `  IP:  ${pod.ip}`,
+          'Containers:',
+          `  ${pod.name.split('-')[0]}:`,
+          '    Container ID:  docker://1234567890abcdef',
+          `    Image:         ${pod.name.split('-')[0]}:latest`,
+          '    Image ID:      docker-pullable://registry.k8s.io/pause:3.9',
+          `    Port:          ${pod.name.includes('postgresql') ? '5432/TCP' : '8080/TCP'}`,
+          `    Host Port:     0/TCP`,
+          `    State:         ${pod.status}`,
+          `    Ready:         ${pod.ready}`,
+          `    Restart Count: ${pod.restarts}`,
+          'Events:'
+        ]);
+        
         if (pod.status === 'CrashLoopBackOff') {
-          term.writeln('  Type     Reason     Age                From               Message');
-          term.writeln('  ----     ------     ----               ----               -------');
-          term.writeln('  Normal   Scheduled  10m                default-scheduler  Successfully assigned default/auth-service to node-1');
-          term.writeln('  Warning  BackOff    9m (x5 over 10m)   kubelet           Back-off restarting failed container');
+          writeLines([
+            '  Type     Reason     Age                From               Message',
+            '  ----     ------     ----               ----               -------',
+            '  Normal   Scheduled  10m                default-scheduler  Successfully assigned default/auth-service to node-1',
+            '  Warning  BackOff    9m (x5 over 10m)   kubelet           Back-off restarting failed container'
+          ]);
         }
       } else {
         term.writeln(`Error: pod "${podName}" not found`);
@@ -268,24 +300,26 @@ function App() {
     } else if (command.startsWith('kubectl edit deployment')) {
       const deploymentName = command.split(' ')[3];
       if (deploymentName === 'auth-service') {
-        term.writeln('# Please edit the object below. Lines beginning with a "#" will be ignored.');
-        term.writeln('apiVersion: apps/v1');
-        term.writeln('kind: Deployment');
-        term.writeln('metadata:');
-        term.writeln('  name: auth-service');
-        term.writeln('spec:');
-        term.writeln('  template:');
-        term.writeln('    spec:');
-        term.writeln('      containers:');
-        term.writeln('      - name: auth-service');
-        term.writeln('        env:');
-        term.writeln('        - name: DB_PASSWORD');
-        term.writeln('          valueFrom:');
-        term.writeln('            secretKeyRef:');
-        term.writeln('              name: db-secret');
-        term.writeln('              key: DB_PASSWORD');
-        term.writeln('');
-        term.writeln('# Configuration updated. Applying changes...');
+        writeLines([
+          '# Please edit the object below. Lines beginning with a "#" will be ignored.',
+          'apiVersion: apps/v1',
+          'kind: Deployment',
+          'metadata:',
+          '  name: auth-service',
+          'spec:',
+          '  template:',
+          '    spec:',
+          '      containers:',
+          '      - name: auth-service',
+          '        env:',
+          '        - name: DB_PASSWORD',
+          '          valueFrom:',
+          '            secretKeyRef:',
+          '              name: db-secret',
+          '              key: DB_PASSWORD',
+          '',
+          '# Configuration updated. Applying changes...'
+        ]);
         
         setTimeout(() => {
           setClusterState(prev => ({
@@ -312,8 +346,10 @@ function App() {
             )
           }));
           setCurrentStep(4);
-          term.writeln('deployment.apps/auth-service edited');
-          term.writeln('Waiting for deployment "auth-service" rollout to finish: 0 of 1 updated replicas are available...');
+          writeLines([
+            'deployment.apps/auth-service edited',
+            'Waiting for deployment "auth-service" rollout to finish: 0 of 1 updated replicas are available...',
+          ]);
           setTimeout(() => {
             term.writeln('deployment "auth-service" successfully rolled out');
           }, 1000);
@@ -326,7 +362,6 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-900 text-white">
-      {/* Header */}
       <header className="bg-gray-800 border-b border-gray-700 p-4">
         <div className="container mx-auto flex items-center justify-between">
           <div className="flex items-center space-x-2">
@@ -354,7 +389,6 @@ function App() {
       </header>
 
       <main className="container mx-auto p-4 grid grid-cols-12 gap-4">
-        {/* Left Panel - Cluster Visualization */}
         <div className="col-span-4 space-y-4">
           <div className="bg-gray-800 rounded-lg p-4">
             <h2 className="text-lg font-semibold mb-4">Cluster Overview</h2>
@@ -414,7 +448,6 @@ function App() {
           )}
         </div>
 
-        {/* Terminal Panel */}
         <div className="col-span-8 bg-gray-800 rounded-lg p-4">
           <div className="flex items-center space-x-2 mb-4">
             <TerminalIcon className="w-5 h-5" />
@@ -425,7 +458,6 @@ function App() {
           </div>
         </div>
 
-        {/* Bottom Panel - Progress */}
         <div className="col-span-12 bg-gray-800 rounded-lg p-4">
           <h2 className="text-lg font-semibold mb-4">Scenario Progress</h2>
           <div className="flex justify-between items-center">
